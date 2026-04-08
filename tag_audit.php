@@ -179,21 +179,50 @@ if (count($tagHeader) <= $tagStartIndex) {
     exit(1);
 } // name_set lookup key and router source are both Port Name per requirement.
 
+$nameSetNameIndex = getColumnIndex($nameSetHeader, ['NAME (Local)', 'Name (Local)', 'NAME LOCAL']);
+$localNameIndex = getColumnIndex($nameSetHeader, ['Local']);
+$globalNameIndex = getColumnIndex($nameSetHeader, ['Global']);
 $portNameIndex = getColumnIndex($nameSetHeader, ['Port Name']);
 if ($portNameIndex === null) {
     fwrite(STDERR, "Error: could not find \"Port Name\" column in name_set file.\n");
     exit(1);
 }
 
-// Build nameset_name -> row lookup where nameset_name is the Port Name value.
+// Build nameset_name -> port_name lookup.
+// Match keys can come from NAME (Local), Local, Global, then Port Name fallback.
 $portByNameSet = [];
 foreach ($nameSetRows as $row) {
-    $nameSetName = trim((string) ($row[$portNameIndex] ?? ''));
-    if ($nameSetName === '') {
+    $portName = trim((string) ($row[$portNameIndex] ?? ''));
+    if ($portName === '') {
         continue;
     }
 
-    $portByNameSet[strtoupper($nameSetName)] = $nameSetName;
+    $nameSetKeys = [];
+    if ($nameSetNameIndex !== null) {
+        $value = trim((string) ($row[$nameSetNameIndex] ?? ''));
+        if ($value !== '') {
+            $nameSetKeys[] = $value;
+        }
+    }
+    if ($localNameIndex !== null) {
+        $value = trim((string) ($row[$localNameIndex] ?? ''));
+        if ($value !== '') {
+            $nameSetKeys[] = $value;
+        }
+    }
+    if ($globalNameIndex !== null) {
+        $value = trim((string) ($row[$globalNameIndex] ?? ''));
+        if ($value !== '') {
+            $nameSetKeys[] = $value;
+        }
+    }
+    if ($nameSetKeys === []) {
+        $nameSetKeys[] = $portName;
+    }
+
+    foreach ($nameSetKeys as $nameSetKey) {
+        $portByNameSet[strtoupper($nameSetKey)] = $portName;
+    }
 }
 
 $matchedRows = [];

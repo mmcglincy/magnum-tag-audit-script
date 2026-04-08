@@ -21,7 +21,7 @@ php tag_audit.php tags.csv name_set.csv ./out
 
 - Reads both CSV files (first row is treated as header).
 - Uses `NAME (Local)` in the tag file as the video nameset name.
-- Uses `Port Name` in the name_set file as the nameset key and to determine router by substring:
+- Uses `NAME (Local)` / `Local` / `Global` in the name_set file as nameset matching keys (with fallback to `Port Name`), and uses `Port Name` to determine router by substring:
   - `CT => CT`
   - `DRE => CT`
   - `ITXR => CT`
