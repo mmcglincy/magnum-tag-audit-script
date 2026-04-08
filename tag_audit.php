@@ -23,6 +23,7 @@ const CSV_LENGTH = 0;
 const CSV_DELIMITER = ',';
 const CSV_ENCLOSURE = '"';
 const CSV_ESCAPE = '\\';
+const XLSX_STYLE_HIGHLIGHT = 1;
 
 if (!is_file($tagFile) || !is_readable($tagFile)) {
     fwrite(STDERR, "Error: tag file is not readable: {$tagFile}\n");
@@ -68,11 +69,10 @@ function readCsv(string $path): array
             continue;
         }
 
-        // Keep row width aligned with header width for output consistency.
+        // Keep at least header width. Do not truncate extra columns because
+        // tag files can have more tag values than header labels.
         if (count($row) < count($header)) {
             $row = array_pad($row, count($header), '');
-        } elseif (count($row) > count($header)) {
-            $row = array_slice($row, 0, count($header));
         }
 
         $rows[] = array_map(
@@ -110,41 +110,10 @@ function normalizeHeaderName(string $value): string
     return preg_replace('/[^a-z0-9]+/', '', strtolower(trim($value))) ?? '';
 }
 
-/**
- * @param array<int, string> $row
- * @param int $startIndex
- */
-function rowContainsTag(array $row, int $startIndex, string $targetTag): bool
-{
-    $target = strtoupper(trim($targetTag));
-
-    for ($i = $startIndex; $i < count($row); $i++) {
-        $cell = strtoupper(trim((string) $row[$i]));
-        if ($cell === '') {
-            continue;
-        }
-
-        if ($cell === $target) {
-            return true;
-        }
-
-        // Handle cases like "CT|TOC", "CT,TOC", "CT TOC", etc.
-        $tokens = preg_split('/[\s,;|\/]+/', $cell) ?: [];
-        foreach ($tokens as $token) {
-            if ($token === $target) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 function determineRouter(string $portName): ?string
 {
     $normalized = strtoupper($portName);
 
-    // Order matters only if a port name contains multiple patterns.
     $patterns = [
         'ITXR' => 'CT',
         'DRE' => 'CT',
@@ -163,117 +132,340 @@ function determineRouter(string $portName): ?string
     return null;
 }
 
-[$tagHeader, $tagRows] = readCsv($tagFile);
-[$nameSetHeader, $nameSetRows] = readCsv($nameSetFile);
-
-$tagNameSetIndex = getColumnIndex($tagHeader, ['NAME (Local)']);
-if ($tagNameSetIndex === null) {
-    fwrite(STDERR, "Error: could not find nameset column in tag file (expected \"NAME (Local)\").\n");
-    exit(1);
-}
-
-// Per requirement, tags are from the 3rd column onward (index 2).
-$tagStartIndex = 2;
-if (count($tagHeader) <= $tagStartIndex) {
-    fwrite(STDERR, "Error: tag file must have at least 3 columns.\n");
-    exit(1);
-} // name_set lookup key and router source are both Port Name per requirement.
-
-$nameSetNameIndex = getColumnIndex($nameSetHeader, ['NAME (Local)', 'Name (Local)', 'NAME LOCAL']);
-$localNameIndex = getColumnIndex($nameSetHeader, ['Local']);
-$globalNameIndex = getColumnIndex($nameSetHeader, ['Global']);
-$portNameIndex = getColumnIndex($nameSetHeader, ['Port Name']);
-if ($portNameIndex === null) {
-    fwrite(STDERR, "Error: could not find \"Port Name\" column in name_set file.\n");
-    exit(1);
-}
-
-// Build nameset_name -> port_name lookup.
-// Match keys can come from NAME (Local), Local, Global, then Port Name fallback.
-$portByNameSet = [];
-foreach ($nameSetRows as $row) {
-    $portName = trim((string) ($row[$portNameIndex] ?? ''));
-    if ($portName === '') {
-        continue;
+/**
+ * @return array<int, string>
+ */
+function splitTagsFromCell(string $cell): array
+{
+    $trimmedCell = trim($cell);
+    if ($trimmedCell === '') {
+        return [];
     }
 
-    $nameSetKeys = [];
-    if ($nameSetNameIndex !== null) {
-        $value = trim((string) ($row[$nameSetNameIndex] ?? ''));
-        if ($value !== '') {
-            $nameSetKeys[] = $value;
+    $tokens = preg_split('/[\s,;|\/]+/', $trimmedCell) ?: [];
+    $tags = [];
+    foreach ($tokens as $token) {
+        $tag = trim($token);
+        if ($tag !== '') {
+            $tags[] = $tag;
         }
     }
-    if ($localNameIndex !== null) {
-        $value = trim((string) ($row[$localNameIndex] ?? ''));
-        if ($value !== '') {
-            $nameSetKeys[] = $value;
-        }
-    }
-    if ($globalNameIndex !== null) {
-        $value = trim((string) ($row[$globalNameIndex] ?? ''));
-        if ($value !== '') {
-            $nameSetKeys[] = $value;
-        }
-    }
-    if ($nameSetKeys === []) {
-        $nameSetKeys[] = $portName;
-    }
 
-    foreach ($nameSetKeys as $nameSetKey) {
-        $portByNameSet[strtoupper($nameSetKey)] = $portName;
-    }
+    return $tags;
 }
 
-$matchedRows = [];
-foreach ($tagRows as $row) {
-    $nameSetName = trim((string) ($row[$tagNameSetIndex] ?? ''));
-    if ($nameSetName === '') {
-        continue;
+/**
+ * @param array<int, string> $row
+ * @return array<int, string>
+ */
+function extractTags(array $row, int $startIndex): array
+{
+    $tags = [];
+    for ($i = $startIndex; $i < count($row); $i++) {
+        foreach (splitTagsFromCell((string) ($row[$i] ?? '')) as $tag) {
+            $tags[] = $tag;
+        }
     }
 
-    $nameSetLookupKey = strtoupper($nameSetName);
-    if (!array_key_exists($nameSetLookupKey, $portByNameSet)) {
-        continue;
-    }
-
-    $router = determineRouter($portByNameSet[$nameSetLookupKey]);
-    if ($router === null) {
-        continue;
-    }
-
-    $hasCtTag = rowContainsTag($row, $tagStartIndex, 'CT');
-    $hasTocTag = rowContainsTag($row, $tagStartIndex, 'TOC');
-    $hasQcSrcTag = rowContainsTag($row, $tagStartIndex, 'QC-SRC');
-    $hasCnnSrcTag = rowContainsTag($row, $tagStartIndex, 'CNN-SRC');
-
-    if ($router === 'CT' && $hasTocTag) {
-        $matchedRows[] = $row;
-        continue;
-    }
-
-    if ($router === 'TOC' && ($hasCtTag || $hasQcSrcTag || $hasCnnSrcTag)) {
-        $matchedRows[] = $row;
-    }
+    return $tags;
 }
 
-$outputFile = rtrim($outputDirectory, DIRECTORY_SEPARATOR)
-    . DIRECTORY_SEPARATOR
-    . date('Y-m-d-H-i')
-    . '-tag-audit.csv';
+function normalizeTag(string $tag): string
+{
+    return strtoupper(trim($tag));
+}
 
-$outputHandle = fopen($outputFile, 'wb');
-if ($outputHandle === false) {
-    fwrite(STDERR, "Error: unable to create output file: {$outputFile}\n");
+/**
+ * @return array<int, string>
+ */
+function getOffendingTagsForRouter(string $router): array
+{
+    if ($router === 'CT') {
+        return ['TOC'];
+    }
+
+    if ($router === 'TOC') {
+        return ['CT', 'QC-SRC', 'CNN-SRC'];
+    }
+
+    return [];
+}
+
+function xmlEscape(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES | ENT_XML1, 'UTF-8');
+}
+
+function excelColumnName(int $index): string
+{
+    $name = '';
+    $current = $index;
+    while ($current >= 0) {
+        $name = chr(($current % 26) + 65) . $name;
+        $current = intdiv($current, 26) - 1;
+    }
+
+    return $name;
+}
+
+function buildInlineStringCellXml(string $cellReference, string $value, bool $highlighted): string
+{
+    $styleAttribute = $highlighted ? ' s="' . XLSX_STYLE_HIGHLIGHT . '"' : '';
+    $spaceAttribute = ($value !== trim($value)) ? ' xml:space="preserve"' : '';
+    return '<c r="' . $cellReference . '"' . $styleAttribute . ' t="inlineStr"><is><t'
+        . $spaceAttribute . '>' . xmlEscape($value) . '</t></is></c>';
+}
+
+/**
+ * @param array<int, string> $header
+ * @param array<int, array<int, string>> $rows
+ * @param array<int, array<int, int>> $highlightColumnsByRow 0-based data-row => 0-based column indexes
+ */
+function writeXlsx(
+    string $path,
+    array $header,
+    array $rows,
+    array $highlightColumnsByRow
+): void {
+    if (!class_exists('ZipArchive')) {
+        throw new RuntimeException('ZipArchive extension is required to create .xlsx output.');
+    }
+
+    $maxColumns = max(1, count($header));
+    foreach ($rows as $row) {
+        $maxColumns = max($maxColumns, count($row));
+    }
+
+    $allRows = array_merge([$header], $rows);
+    $lastRowNumber = max(1, count($allRows));
+    $dimension = 'A1:' . excelColumnName($maxColumns - 1) . $lastRowNumber;
+
+    $sheetRowsXml = '';
+    foreach ($allRows as $rowIndex => $rowValues) {
+        $excelRow = $rowIndex + 1;
+        $highlightedColumns = [];
+        if ($rowIndex > 0) {
+            $highlightedColumns = array_flip($highlightColumnsByRow[$rowIndex - 1] ?? []);
+        }
+
+        $cellsXml = '';
+        for ($columnIndex = 0; $columnIndex < $maxColumns; $columnIndex++) {
+            $value = (string) ($rowValues[$columnIndex] ?? '');
+            $isHighlighted = isset($highlightedColumns[$columnIndex]);
+
+            if ($value === '' && !$isHighlighted) {
+                continue;
+            }
+
+            $cellReference = excelColumnName($columnIndex) . $excelRow;
+            $cellsXml .= buildInlineStringCellXml($cellReference, $value, $isHighlighted);
+        }
+
+        $sheetRowsXml .= '<row r="' . $excelRow . '">' . $cellsXml . '</row>';
+    }
+
+    $worksheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        . '<dimension ref="' . $dimension . '"/>'
+        . '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        . '<sheetFormatPr defaultRowHeight="15"/>'
+        . '<sheetData>' . $sheetRowsXml . '</sheetData>'
+        . '</worksheet>';
+
+    $stylesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        . '<fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>'
+        . '<fills count="3">'
+        . '<fill><patternFill patternType="none"/></fill>'
+        . '<fill><patternFill patternType="gray125"/></fill>'
+        . '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>'
+        . '</fills>'
+        . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        . '<cellXfs count="2">'
+        . '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        . '<xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/>'
+        . '</cellXfs>'
+        . '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        . '</styleSheet>';
+
+    $workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        . 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        . '<sheets><sheet name="Tag Audit" sheetId="1" r:id="rId1"/></sheets>'
+        . '</workbook>';
+
+    $contentTypesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        . '<Default Extension="xml" ContentType="application/xml"/>'
+        . '<Override PartName="/xl/workbook.xml" '
+        . 'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        . '<Override PartName="/xl/worksheets/sheet1.xml" '
+        . 'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        . '<Override PartName="/xl/styles.xml" '
+        . 'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        . '</Types>';
+
+    $rootRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        . '<Relationship Id="rId1" '
+        . 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        . 'Target="xl/workbook.xml"/>'
+        . '</Relationships>';
+
+    $workbookRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        . '<Relationship Id="rId1" '
+        . 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        . 'Target="worksheets/sheet1.xml"/>'
+        . '<Relationship Id="rId2" '
+        . 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        . 'Target="styles.xml"/>'
+        . '</Relationships>';
+
+    $zip = new ZipArchive();
+    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        throw new RuntimeException("Unable to create output file: {$path}");
+    }
+
+    $zip->addFromString('[Content_Types].xml', $contentTypesXml);
+    $zip->addFromString('_rels/.rels', $rootRelsXml);
+    $zip->addFromString('xl/workbook.xml', $workbookXml);
+    $zip->addFromString('xl/_rels/workbook.xml.rels', $workbookRelsXml);
+    $zip->addFromString('xl/styles.xml', $stylesXml);
+    $zip->addFromString('xl/worksheets/sheet1.xml', $worksheetXml);
+    $zip->close();
+}
+
+try {
+    [$tagHeader, $tagRows] = readCsv($tagFile);
+    [$nameSetHeader, $nameSetRows] = readCsv($nameSetFile);
+
+    $tagNameSetIndex = getColumnIndex($tagHeader, ['NAME (Local)']);
+    if ($tagNameSetIndex === null) {
+        throw new RuntimeException('Could not find nameset column in tag file (expected "NAME (Local)").');
+    }
+
+    // Per requirement, tags are from the 3rd column onward (index 2).
+    $tagStartIndex = 2;
+    if (count($tagHeader) <= $tagStartIndex) {
+        throw new RuntimeException('Tag file must have at least 3 columns.');
+    }
+
+    $nameSetNameIndex = getColumnIndex($nameSetHeader, ['NAME (Local)', 'Name (Local)', 'NAME LOCAL']);
+    $localNameIndex = getColumnIndex($nameSetHeader, ['Local']);
+    $globalNameIndex = getColumnIndex($nameSetHeader, ['Global']);
+    $portNameIndex = getColumnIndex($nameSetHeader, ['Port Name']);
+    if ($portNameIndex === null) {
+        throw new RuntimeException('Could not find "Port Name" column in name_set file.');
+    }
+
+    // Build nameset_name -> port_name lookup.
+    // Match keys can come from NAME (Local), Local, Global, then Port Name fallback.
+    $portByNameSet = [];
+    foreach ($nameSetRows as $row) {
+        $portName = trim((string) ($row[$portNameIndex] ?? ''));
+        if ($portName === '') {
+            continue;
+        }
+
+        $candidateKeys = [];
+        foreach ([$nameSetNameIndex, $localNameIndex, $globalNameIndex] as $index) {
+            if ($index === null) {
+                continue;
+            }
+            $value = trim((string) ($row[$index] ?? ''));
+            if ($value !== '') {
+                $candidateKeys[] = $value;
+            }
+        }
+        $candidateKeys[] = $portName;
+        $candidateKeys = array_values(array_unique($candidateKeys));
+
+        foreach ($candidateKeys as $key) {
+            $portByNameSet[strtoupper($key)] = $portName;
+        }
+    }
+
+    $matchedRows = [];
+    $maxTagCount = 0;
+
+    foreach ($tagRows as $row) {
+        $nameSetName = trim((string) ($row[$tagNameSetIndex] ?? ''));
+        if ($nameSetName === '') {
+            continue;
+        }
+
+        $lookupKey = strtoupper($nameSetName);
+        if (!array_key_exists($lookupKey, $portByNameSet)) {
+            continue;
+        }
+
+        $router = determineRouter($portByNameSet[$lookupKey]);
+        if ($router === null) {
+            continue;
+        }
+
+        $tags = extractTags($row, $tagStartIndex);
+        if ($tags === []) {
+            continue;
+        }
+
+        $offendingTagSet = getOffendingTagsForRouter($router);
+        $offendingPositions = [];
+        foreach ($tags as $position => $tag) {
+            if (in_array(normalizeTag($tag), $offendingTagSet, true)) {
+                $offendingPositions[] = $position;
+            }
+        }
+
+        if ($offendingPositions === []) {
+            continue;
+        }
+
+        $maxTagCount = max($maxTagCount, count($tags));
+        $matchedRows[] = [
+            'baseColumns' => array_slice($row, 0, $tagStartIndex),
+            'tags' => $tags,
+            'offendingPositions' => $offendingPositions,
+        ];
+    }
+
+    $tagColumnCount = max(1, $maxTagCount);
+    $outputHeader = array_slice($tagHeader, 0, $tagStartIndex);
+    for ($i = 1; $i <= $tagColumnCount; $i++) {
+        $outputHeader[] = 'Tag ' . $i;
+    }
+
+    $outputRows = [];
+    $highlightColumnsByRow = [];
+    foreach ($matchedRows as $matchedRow) {
+        $outRow = array_merge($matchedRow['baseColumns'], $matchedRow['tags']);
+        $requiredSize = $tagStartIndex + $tagColumnCount;
+        if (count($outRow) < $requiredSize) {
+            $outRow = array_pad($outRow, $requiredSize, '');
+        }
+        $outputRows[] = $outRow;
+
+        $highlightColumns = [];
+        foreach ($matchedRow['offendingPositions'] as $offendingTagPosition) {
+            $highlightColumns[] = $tagStartIndex + $offendingTagPosition;
+        }
+        $highlightColumnsByRow[] = $highlightColumns;
+    }
+
+    $outputFile = rtrim($outputDirectory, DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR
+        . date('Y-m-d-H-i')
+        . '-tag-audit.xlsx';
+
+    writeXlsx($outputFile, $outputHeader, $outputRows, $highlightColumnsByRow);
+
+    fwrite(STDOUT, "Output written: {$outputFile}\n");
+    fwrite(STDOUT, 'Rows written: ' . count($outputRows) . "\n");
+} catch (Throwable $exception) {
+    fwrite(STDERR, 'Error: ' . $exception->getMessage() . "\n");
     exit(1);
 }
-
-fputcsv($outputHandle, $tagHeader, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
-foreach ($matchedRows as $row) {
-    fputcsv($outputHandle, $row, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
-}
-fclose($outputHandle);
-
-fwrite(STDOUT, "Output written: {$outputFile}\n");
-fwrite(STDOUT, 'Rows written: ' . count($matchedRows) . "\n");
 
