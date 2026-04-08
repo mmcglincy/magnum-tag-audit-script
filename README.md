@@ -21,7 +21,7 @@ php tag_audit.php tags.csv name_set.csv ./out
 
 - Reads both CSV files (first row is treated as header).
 - Uses `NAME (Local)` in the tag file as the video nameset name.
-- Uses `Port Name` in the name_set file to determine router by substring:
+- Uses `Port Name` in the name_set file as the nameset key and to determine router by substring:
   - `CT => CT`
   - `DRE => CT`
   - `ITXR => CT`
@@ -34,3 +34,5 @@ php tag_audit.php tags.csv name_set.csv ./out
   - router is `TOC` and video contains tag `CT`.
 - Output filename format:
   - `YYYY-MM-DD-HH:mm-tag-audit.csv`
+- CSV parsing/writing explicitly provides the `escape` argument to avoid:
+  - `Deprecated: fgetcsv(): the $escape parameter must be provided as its default value`

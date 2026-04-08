@@ -19,6 +19,11 @@ $tagFile = $argv[1];
 $nameSetFile = $argv[2];
 $outputDirectory = $argv[3] ?? getcwd();
 
+const CSV_LENGTH = 0;
+const CSV_DELIMITER = ',';
+const CSV_ENCLOSURE = '"';
+const CSV_ESCAPE = '\\';
+
 if (!is_file($tagFile) || !is_readable($tagFile)) {
     fwrite(STDERR, "Error: tag file is not readable: {$tagFile}\n");
     exit(1);
@@ -46,7 +51,7 @@ function readCsv(string $path): array
         throw new RuntimeException("Unable to open CSV file: {$path}");
     }
 
-    $header = fgetcsv($handle);
+    $header = fgetcsv($handle, CSV_LENGTH, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
     if ($header === false) {
         fclose($handle);
         throw new RuntimeException("CSV file is empty: {$path}");
@@ -58,7 +63,7 @@ function readCsv(string $path): array
     );
 
     $rows = [];
-    while (($row = fgetcsv($handle)) !== false) {
+    while (($row = fgetcsv($handle, CSV_LENGTH, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE)) !== false) {
         if ($row === [null] || $row === false) {
             continue;
         }
@@ -161,7 +166,7 @@ function determineRouter(string $portName): ?string
 [$tagHeader, $tagRows] = readCsv($tagFile);
 [$nameSetHeader, $nameSetRows] = readCsv($nameSetFile);
 
-$tagNameSetIndex = getColumnIndex($tagHeader, ['NAME (Local)', 'nameset_name', 'Name Set Name']);
+$tagNameSetIndex = getColumnIndex($tagHeader, ['NAME (Local)']);
 if ($tagNameSetIndex === null) {
     fwrite(STDERR, "Error: could not find nameset column in tag file (expected \"NAME (Local)\").\n");
     exit(1);
@@ -172,37 +177,23 @@ $tagStartIndex = 2;
 if (count($tagHeader) <= $tagStartIndex) {
     fwrite(STDERR, "Error: tag file must have at least 3 columns.\n");
     exit(1);
-}
+} // name_set lookup key and router source are both Port Name per requirement.
 
-$nameSetNameIndex = getColumnIndex(
-    $nameSetHeader,
-    ['NAME (Local)', 'nameset_name', 'Name Set Name', 'NameSet Name', 'Name Set']
-);
 $portNameIndex = getColumnIndex($nameSetHeader, ['Port Name']);
-
-if ($nameSetNameIndex === null) {
-    fwrite(
-        STDERR,
-        "Error: could not find nameset column in name_set file (e.g. \"nameset_name\").\n"
-    );
-    exit(1);
-}
-
 if ($portNameIndex === null) {
     fwrite(STDERR, "Error: could not find \"Port Name\" column in name_set file.\n");
     exit(1);
 }
 
-// Build nameset_name -> port_name lookup from name_set file.
+// Build nameset_name -> row lookup where nameset_name is the Port Name value.
 $portByNameSet = [];
 foreach ($nameSetRows as $row) {
-    $nameSetName = trim((string) ($row[$nameSetNameIndex] ?? ''));
-    $portName = trim((string) ($row[$portNameIndex] ?? ''));
-    if ($nameSetName === '' || $portName === '') {
+    $nameSetName = trim((string) ($row[$portNameIndex] ?? ''));
+    if ($nameSetName === '') {
         continue;
     }
 
-    $portByNameSet[$nameSetName] = $portName;
+    $portByNameSet[strtoupper($nameSetName)] = $nameSetName;
 }
 
 $matchedRows = [];
@@ -212,11 +203,12 @@ foreach ($tagRows as $row) {
         continue;
     }
 
-    if (!array_key_exists($nameSetName, $portByNameSet)) {
+    $nameSetLookupKey = strtoupper($nameSetName);
+    if (!array_key_exists($nameSetLookupKey, $portByNameSet)) {
         continue;
     }
 
-    $router = determineRouter($portByNameSet[$nameSetName]);
+    $router = determineRouter($portByNameSet[$nameSetLookupKey]);
     if ($router === null) {
         continue;
     }
@@ -245,9 +237,9 @@ if ($outputHandle === false) {
     exit(1);
 }
 
-fputcsv($outputHandle, $tagHeader);
+fputcsv($outputHandle, $tagHeader, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
 foreach ($matchedRows as $row) {
-    fputcsv($outputHandle, $row);
+    fputcsv($outputHandle, $row, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
 }
 fclose($outputHandle);
 
