@@ -37,5 +37,10 @@ php tag_audit.php tags.csv name_set.csv ./out
 - Output is an Excel `.xlsx` file where:
   - each unique tag gets its own fixed column (for example, `CT` is always in the `CT` column)
   - offending tag cells are highlighted in yellow
+- A second output file is also written:
+  - `YYYY-MM-DD-HH-mm-tag-audit-fixes.csv`
+  - for each flagged row, if a CT/TOC counterpart nameset exists in `name_set`:
+    - writes the original row with offending tags removed
+    - writes the counterpart row with offending tags added
 - CSV parsing explicitly provides the `escape` argument to avoid:
   - `Deprecated: fgetcsv(): the $escape parameter must be provided as its default value`

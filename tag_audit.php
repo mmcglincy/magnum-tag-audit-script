@@ -191,6 +191,24 @@ function getOffendingTagsForRouter(string $router): array
     return [];
 }
 
+function getCounterpartNameSet(string $nameSetName): ?string
+{
+    $trimmed = trim($nameSetName);
+    if ($trimmed === '') {
+        return null;
+    }
+
+    if (preg_match('/^(.*)-CT$/i', $trimmed, $matches) === 1) {
+        return $matches[1] . '-TOC';
+    }
+
+    if (preg_match('/^(.*)-TOC$/i', $trimmed, $matches) === 1) {
+        return $matches[1] . '-CT';
+    }
+
+    return null;
+}
+
 function xmlEscape(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES | ENT_XML1, 'UTF-8');
@@ -364,6 +382,7 @@ try {
     // Build nameset_name -> port_name lookup.
     // Match keys can come from NAME (Local), Local, Global, then Port Name fallback.
     $portByNameSet = [];
+    $nameSetExists = [];
     foreach ($nameSetRows as $row) {
         $portName = trim((string) ($row[$portNameIndex] ?? ''));
         if ($portName === '') {
@@ -384,7 +403,23 @@ try {
         $candidateKeys = array_values(array_unique($candidateKeys));
 
         foreach ($candidateKeys as $key) {
-            $portByNameSet[strtoupper($key)] = $portName;
+            $normalizedKey = strtoupper($key);
+            $portByNameSet[$normalizedKey] = $portName;
+            $nameSetExists[$normalizedKey] = true;
+        }
+    }
+
+    // Index tag rows by nameset_name for quick counterpart lookup.
+    $tagRowsByNameSet = [];
+    foreach ($tagRows as $row) {
+        $nameSetName = trim((string) ($row[$tagNameSetIndex] ?? ''));
+        if ($nameSetName === '') {
+            continue;
+        }
+
+        $normalizedNameSet = strtoupper($nameSetName);
+        if (!array_key_exists($normalizedNameSet, $tagRowsByNameSet)) {
+            $tagRowsByNameSet[$normalizedNameSet] = $row;
         }
     }
 
@@ -445,6 +480,9 @@ try {
         }
 
         $matchedRows[] = [
+            'nameSetName' => $nameSetName,
+            'router' => $router,
+            'originalRow' => $row,
             'baseColumns' => array_slice($row, 0, $tagStartIndex),
             'presentTags' => array_keys($presentTagsByNormalized),
             'offendingTags' => array_keys($offendingTagsByNormalized),
@@ -492,15 +530,119 @@ try {
         $highlightColumnsByRow[] = $highlightColumns;
     }
 
+    $timestamp = date('Y-m-d-H-i');
     $outputFile = rtrim($outputDirectory, DIRECTORY_SEPARATOR)
         . DIRECTORY_SEPARATOR
-        . date('Y-m-d-H-i')
+        . $timestamp
         . '-tag-audit.xlsx';
 
     writeXlsx($outputFile, $outputHeader, $outputRows, $highlightColumnsByRow);
 
+    $fixRows = [];
+    foreach ($matchedRows as $matchedRow) {
+        $sourceNameSet = (string) ($matchedRow['nameSetName'] ?? '');
+        $sourceRouter = (string) ($matchedRow['router'] ?? '');
+        $counterpartNameSet = getCounterpartNameSet($sourceNameSet);
+        if ($counterpartNameSet === null) {
+            continue;
+        }
+
+        $counterpartKey = strtoupper($counterpartNameSet);
+        if (!array_key_exists($counterpartKey, $nameSetExists)) {
+            continue;
+        }
+
+        $counterpartPortName = $portByNameSet[$counterpartKey] ?? '';
+        if ($counterpartPortName === '') {
+            continue;
+        }
+
+        $counterpartRouter = determineRouter($counterpartPortName);
+        if ($counterpartRouter === null) {
+            continue;
+        }
+
+        // Only transfer tags when the discovered counterpart is on the opposite router.
+        if ($sourceRouter === 'CT' && $counterpartRouter !== 'TOC') {
+            continue;
+        }
+        if ($sourceRouter === 'TOC' && $counterpartRouter !== 'CT') {
+            continue;
+        }
+
+        if (!array_key_exists($counterpartKey, $tagRowsByNameSet)) {
+            continue;
+        }
+
+        $offendingTagSet = [];
+        foreach ($matchedRow['offendingTags'] as $offendingTag) {
+            $offendingTagSet[$offendingTag] = true;
+        }
+
+        $sourceOriginalRow = $matchedRow['originalRow'];
+        $sourceBase = array_slice($sourceOriginalRow, 0, $tagStartIndex);
+        $sourceTags = extractTags($sourceOriginalRow, $tagStartIndex);
+        $sourceFixedTags = [];
+        foreach ($sourceTags as $sourceTag) {
+            if (!isset($offendingTagSet[normalizeTag($sourceTag)])) {
+                $sourceFixedTags[] = $sourceTag;
+            }
+        }
+
+        $counterpartOriginalRow = $tagRowsByNameSet[$counterpartKey];
+        $counterpartBase = array_slice($counterpartOriginalRow, 0, $tagStartIndex);
+        $counterpartTags = extractTags($counterpartOriginalRow, $tagStartIndex);
+        $counterpartTagSet = [];
+        foreach ($counterpartTags as $counterpartTag) {
+            $counterpartTagSet[normalizeTag($counterpartTag)] = true;
+        }
+
+        foreach ($matchedRow['offendingTags'] as $offendingTag) {
+            if (!isset($counterpartTagSet[$offendingTag])) {
+                $counterpartTags[] = $tagDisplayByNormalized[$offendingTag] ?? $offendingTag;
+                $counterpartTagSet[$offendingTag] = true;
+            }
+        }
+
+        $fixRows[] = array_merge($sourceBase, $sourceFixedTags);
+        $fixRows[] = array_merge($counterpartBase, $counterpartTags);
+    }
+
+    $fixTagColumnCount = 1;
+    foreach ($fixRows as $fixRow) {
+        $fixTagColumnCount = max($fixTagColumnCount, max(0, count($fixRow) - $tagStartIndex));
+    }
+
+    $fixHeader = array_slice($tagHeader, 0, $tagStartIndex);
+    for ($i = 1; $i <= $fixTagColumnCount; $i++) {
+        $fixHeader[] = 'Tag ' . $i;
+    }
+
+    $fixOutputFile = rtrim($outputDirectory, DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR
+        . $timestamp
+        . '-tag-audit-fixes.csv';
+
+    $fixHandle = fopen($fixOutputFile, 'wb');
+    if ($fixHandle === false) {
+        throw new RuntimeException("Unable to create output file: {$fixOutputFile}");
+    }
+
+    fputcsv($fixHandle, $fixHeader, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
+    foreach ($fixRows as $fixRow) {
+        $requiredSize = $tagStartIndex + $fixTagColumnCount;
+        if (count($fixRow) < $requiredSize) {
+            $fixRow = array_pad($fixRow, $requiredSize, '');
+        }
+
+        fputcsv($fixHandle, $fixRow, CSV_DELIMITER, CSV_ENCLOSURE, CSV_ESCAPE);
+    }
+    fclose($fixHandle);
+
     fwrite(STDOUT, "Output written: {$outputFile}\n");
     fwrite(STDOUT, 'Rows written: ' . count($outputRows) . "\n");
+    fwrite(STDOUT, "Fixes written: {$fixOutputFile}\n");
+    fwrite(STDOUT, 'Fix rows written: ' . count($fixRows) . "\n");
 } catch (Throwable $exception) {
     fwrite(STDERR, 'Error: ' . $exception->getMessage() . "\n");
     exit(1);
