@@ -389,7 +389,8 @@ try {
     }
 
     $matchedRows = [];
-    $maxTagCount = 0;
+    $tagColumnIndexByNormalized = [];
+    $tagDisplayByNormalized = [];
 
     foreach ($tagRows as $row) {
         $nameSetName = trim((string) ($row[$tagNameSetIndex] ?? ''));
@@ -412,45 +413,81 @@ try {
             continue;
         }
 
-        $offendingTagSet = getOffendingTagsForRouter($router);
-        $offendingPositions = [];
-        foreach ($tags as $position => $tag) {
-            if (in_array(normalizeTag($tag), $offendingTagSet, true)) {
-                $offendingPositions[] = $position;
+        $presentTagsByNormalized = [];
+        foreach ($tags as $tag) {
+            $normalizedTag = normalizeTag($tag);
+            if ($normalizedTag === '') {
+                continue;
+            }
+
+            $presentTagsByNormalized[$normalizedTag] = true;
+
+            if (!array_key_exists($normalizedTag, $tagColumnIndexByNormalized)) {
+                $tagColumnIndexByNormalized[$normalizedTag] = count($tagColumnIndexByNormalized);
+                $tagDisplayByNormalized[$normalizedTag] = $normalizedTag;
             }
         }
 
-        if ($offendingPositions === []) {
+        if ($presentTagsByNormalized === []) {
             continue;
         }
 
-        $maxTagCount = max($maxTagCount, count($tags));
+        $offendingTagSet = getOffendingTagsForRouter($router);
+        $offendingTagsByNormalized = [];
+        foreach ($offendingTagSet as $offendingTag) {
+            if (isset($presentTagsByNormalized[$offendingTag])) {
+                $offendingTagsByNormalized[$offendingTag] = true;
+            }
+        }
+
+        if ($offendingTagsByNormalized === []) {
+            continue;
+        }
+
         $matchedRows[] = [
             'baseColumns' => array_slice($row, 0, $tagStartIndex),
-            'tags' => $tags,
-            'offendingPositions' => $offendingPositions,
+            'presentTags' => array_keys($presentTagsByNormalized),
+            'offendingTags' => array_keys($offendingTagsByNormalized),
         ];
     }
 
-    $tagColumnCount = max(1, $maxTagCount);
+    $tagColumnCount = max(1, count($tagColumnIndexByNormalized));
     $outputHeader = array_slice($tagHeader, 0, $tagStartIndex);
-    for ($i = 1; $i <= $tagColumnCount; $i++) {
-        $outputHeader[] = 'Tag ' . $i;
+    if ($tagColumnIndexByNormalized === []) {
+        $outputHeader[] = 'Tag';
+    } else {
+        foreach ($tagColumnIndexByNormalized as $normalizedTag => $_index) {
+            $outputHeader[] = $tagDisplayByNormalized[$normalizedTag];
+        }
     }
 
     $outputRows = [];
     $highlightColumnsByRow = [];
     foreach ($matchedRows as $matchedRow) {
-        $outRow = array_merge($matchedRow['baseColumns'], $matchedRow['tags']);
+        $outRow = array_merge($matchedRow['baseColumns'], array_fill(0, $tagColumnCount, ''));
         $requiredSize = $tagStartIndex + $tagColumnCount;
         if (count($outRow) < $requiredSize) {
             $outRow = array_pad($outRow, $requiredSize, '');
         }
+
+        foreach ($matchedRow['presentTags'] as $normalizedTag) {
+            if (!array_key_exists($normalizedTag, $tagColumnIndexByNormalized)) {
+                continue;
+            }
+
+            $columnOffset = $tagColumnIndexByNormalized[$normalizedTag];
+            $outRow[$tagStartIndex + $columnOffset] = $tagDisplayByNormalized[$normalizedTag];
+        }
+
         $outputRows[] = $outRow;
 
         $highlightColumns = [];
-        foreach ($matchedRow['offendingPositions'] as $offendingTagPosition) {
-            $highlightColumns[] = $tagStartIndex + $offendingTagPosition;
+        foreach ($matchedRow['offendingTags'] as $offendingTag) {
+            if (!array_key_exists($offendingTag, $tagColumnIndexByNormalized)) {
+                continue;
+            }
+
+            $highlightColumns[] = $tagStartIndex + $tagColumnIndexByNormalized[$offendingTag];
         }
         $highlightColumnsByRow[] = $highlightColumns;
     }

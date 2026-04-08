@@ -35,7 +35,7 @@ php tag_audit.php tags.csv name_set.csv ./out
 - Output filename format:
   - `YYYY-MM-DD-HH-mm-tag-audit.xlsx`
 - Output is an Excel `.xlsx` file where:
-  - each tag is written into its own column (`Tag 1`, `Tag 2`, ...)
+  - each unique tag gets its own fixed column (for example, `CT` is always in the `CT` column)
   - offending tag cells are highlighted in yellow
 - CSV parsing explicitly provides the `escape` argument to avoid:
   - `Deprecated: fgetcsv(): the $escape parameter must be provided as its default value`
