@@ -31,8 +31,8 @@ php tag_audit.php tags.csv name_set.csv ./out
 - Tags are checked from the 3rd column onward in the tag file.
 - Writes rows to output when:
   - router is `CT` and video contains tag `TOC`, or
-  - router is `TOC` and video contains tag `CT`.
+  - router is `TOC` and video contains tag `CT` or `QC-SRC` or `cnn-src`.
 - Output filename format:
-  - `YYYY-MM-DD-HH:mm-tag-audit.csv`
+  - `YYYY-MM-DD-HH-mm-tag-audit.csv`
 - CSV parsing/writing explicitly provides the `escape` argument to avoid:
   - `Deprecated: fgetcsv(): the $escape parameter must be provided as its default value`

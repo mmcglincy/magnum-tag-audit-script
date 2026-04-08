@@ -215,20 +215,22 @@ foreach ($tagRows as $row) {
 
     $hasCtTag = rowContainsTag($row, $tagStartIndex, 'CT');
     $hasTocTag = rowContainsTag($row, $tagStartIndex, 'TOC');
+    $hasQcSrcTag = rowContainsTag($row, $tagStartIndex, 'QC-SRC');
+    $hasCnnSrcTag = rowContainsTag($row, $tagStartIndex, 'CNN-SRC');
 
     if ($router === 'CT' && $hasTocTag) {
         $matchedRows[] = $row;
         continue;
     }
 
-    if ($router === 'TOC' && $hasCtTag) {
+    if ($router === 'TOC' && ($hasCtTag || $hasQcSrcTag || $hasCnnSrcTag)) {
         $matchedRows[] = $row;
     }
 }
 
 $outputFile = rtrim($outputDirectory, DIRECTORY_SEPARATOR)
     . DIRECTORY_SEPARATOR
-    . date('Y-m-d-H:i')
+    . date('Y-m-d-H-i')
     . '-tag-audit.csv';
 
 $outputHandle = fopen($outputFile, 'wb');
